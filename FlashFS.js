@@ -36,7 +36,7 @@ FlashFS.prototype.u32b4 = function(number){
 
 // Проверка, что флеш память инициализирована модулем FS и нет ошибок
 FlashFS.prototype.check = function(){
-    if (params.flash.read(3, params.flash_addr) != params.HEADER_BYTE) {
+    if (params.flash.read(3, params.flash_addr) != params.HEADER_BYTE){
         return false;
     }
 
@@ -54,7 +54,7 @@ FlashFS.prototype.prepare = function(){
 FlashFS.prototype.format = function(){
 
     // Watchdog нужно усмирить и перейти на асинхронный режим
-    for (let cAddr = params.flash_addr; cAddr < params.flash_addr + params.flash_length; cAddr = cAddr + params.PAGE_SIZE) {
+    for (let cAddr = params.flash_addr; cAddr < params.flash_addr + params.flash_length; cAddr = cAddr + params.PAGE_SIZE){
         params.flash.erasePage(cAddr);
     }
 
@@ -180,32 +180,48 @@ function FileFS(fs, fileIndex, mode){
     this.seekPos = fileIndex.addr;
 }
 
+// Выполняет неблокирующее чтение файла и запись порциями в объект destination
 FileFS.prototype.pipe = function(destination, options){
-    throw new Error("FS: Method not implemented");
+    var chunkSize = options && options.chunkSize || 32;
+    var buffer;
+
+    while(buffer = this.read(chunkSize)){
+        destination.write(buffer);
+    };
+
+    // После выполнения вызываем функцию завершения
+    if (options && typeof options.complete === "function") {
+        options.complete();
+    }
 };
 
+// Передвигает текущую позицию чтения/записи на указанное количество байт вперед/назад
+// Возвращает абсолютную позицию потока
 FileFS.prototype.seek = function(nBytes){
-    let newSeekPos = this.seekPos + nBytes;
+    let newSeekPos = this.seekPos + (nBytes || 0);
 
     // Если передвигаем позицию за пределы начала файла или конца флеша
-    if (newSeekPos < this.fileIndex.addr || newSeekPos > this.fs.addr) {
+    if (newSeekPos < this.fileIndex.addr || newSeekPos > this.fs.addr){
         throw new Error("FS: Wrong position to seek!");
     }
 
-    this.seekPos = newSeekPos;
-    return newSeekPos;
+    return this.seekPos = newSeekPos;
 };
 
+// Передвигает текущую позицию чтения/записи вперед на указанное количество байт
 FileFS.prototype.skip = function(nBytes){
-    if (nBytes < 0) {
+    nBytes = nBytes || 0;
+
+    if (nBytes < 0){
         throw new Error("FS: nBytes should be positive number!");
     }
 
     this.seek(nBytes);
 };
 
+// Функция чтения возвращает строку. Указываем количество байт, которые требуется прочесть
 FileFS.prototype.read = function(length){
-    if (this.mode == "w") {
+    if (this.mode == "w"){
         throw new Error("FS: Can't read in write mode!");
     }
 
@@ -230,22 +246,17 @@ FileFS.prototype.read = function(length){
 };
 
 // Записываем данные в файл
+// buffer - если строка, то запишется как массив байт. Если является целым числом, тогда пишется один байт
 FileFS.prototype.write = function(buffer){
-
     let lenBuffer;
 
-    // Массив или строка
     if (typeof buffer === "object" || typeof buffer === "string"){
         lenBuffer = buffer.length;
-    }
-
-    // Число воспринимаем как один байт
-    if (typeof buffer === "number"){
+    } else {
         lenBuffer = 1;
-        buffer = buffer & 0xFF;
     }
 
-    if (this.mode == "r") {
+    if (this.mode == "r"){
         throw new Error("FS: Can't write in read mode!");
     }
 
@@ -267,5 +278,81 @@ FileFS.prototype.close = function(){
 
     // Запишем размер файла
     let lenFile = this.seekPos - this.fileIndex.addr;
-    params.flash.write(this.fs.u32b4(lenFile), this.fileIndex.bof + params.BOF_LENGTH + params.FILE_NAME_LENGTH );
+    params.flash.write(this.fs.u32b4(lenFile), this.fileIndex.bof + params.BOF_LENGTH + params.FILE_NAME_LENGTH);
 };
+
+exports = function(flashObject, start_addr, length){ return new FlashFS(flashObject, start_addr, length) };
+ 
+/* ***********************************          ТЕСТЫ        ***********************************  */
+/*
+let flash = require("Flash");
+let vfs = exports.init(flash, 1048576, 3125248);
+
+try {
+    vfs.list();
+} catch (ex) {
+    console.log("Check FS not init: " + ex.message);
+}
+
+vfs.prepare();
+
+let f = vfs.openFile("ABC.txt", "w");
+f.write("Hello World!");
+f.write("12345")
+f.write("!");
+f.close();
+
+
+try {
+    vfs.openFile("NotExists.txt", "r");
+} catch (ex) {
+    console.log("Check File not exists: " + ex.message);
+}
+
+try {
+    vfs.openFile("ABC.txt")    
+} catch (ex) {
+    console.log("Check file with unknown mode: " + ex.message);
+}
+
+let f2 = vfs.openFile("File2.txt", "w")
+f2.write("success!!!")
+f2.write("There are many variations of passages of Lorem Ipsum available, but the majority have suffered alteration in some form, by injected humour, or randomised words which don't look even slightly believable. If you are going to use a passage of Lorem Ipsum, you need to be sure there isn't anything embarrassing hidden in the middle of text. All the Lorem Ipsum generators on the Internet tend to repeat predefined chunks as necessary, making this the first true generator on the Internet. It uses a dictionary of over 200 Latin words, combined with a handful of model sentence structures, to generate Lorem Ipsum which looks reasonable. The generated Lorem Ipsum is therefore always free from repetition, injected humour, or non-characteristic words etc.@");
+f2.close()
+
+f2 = vfs.openFile("File2.txt", "r")
+var buffer;
+
+while (buffer = f2.read(10)){
+    console.log(data);
+}
+
+*/
+/*
+vfs.list();
+vfs.write("ABC.txt", "Hello World!");
+vfs.list();
+
+vfs.write("BigFile.txt", "A".repeat(2128));
+
+    Example data                                        Size  Offset  Description
+
+    56 46 53                                              3     0    FS Header, ASCII 'VFS'
+    FA                                                    1     3    Start of each file (BOF)
+      48 65 6C 6C 6F 57 6F 72 6C 64 2E 70 6E 67 00 00    16     4    FilePath has 16 bytes  'HelloWorld.png'
+      00 00 00 0A                                         4    20    Filesize for content 'HelloWorld 12345', 16 bytes
+      00 77 88 99                                         4    24    FileAddr from flash
+    FB                                                    1    28    End of each file (EOF)
+
+    VFS contains maximum 163 files, because content is being write with second page.
+    Content of file writing in start of page. Note: file 4000 bytes has reserving 4096 bytes of page. File 4100 bytes has reserving 8192 bytes.
+
+    File descriptor is object:
+
+    { "bof": 100000,
+      "path": "sample.txt",
+      "length": 200,
+      "addr": 100024,
+      "eof": 100220  }
+
+*/
