@@ -1,3 +1,13 @@
+/* Copyright (c) 2022 Kruglov Vladilen aka VSVLAD. See the file LICENSE for copying permission. */
+/*
+    This is a module for project espruino that implements a very simple file system for ESP8266 boards.
+    File access objects have a similar interface to the File object of the FS module.
+    Write and read operations are supported. Delete operation not implemented yet
+*/
+
+/**
+* Private constants
+*/
 let params = {
     PAGE_SIZE: 4096,
 
@@ -16,24 +26,42 @@ let params = {
     flash_length: undefined
 };
 
-// Конструктор класса для файловой системы
+/**
+* Constructor for initialize FS
+* @constructor
+* @param	{object} flashObject typicaly is object module "Flash"
+* @param	{number} first address for reserving
+* @param	{number} length of bytes for reserving
+* @return	{object} wrapper object for working with FS
+*/
 function FlashFS(flashObject, start_addr, length){
     params.flash = flashObject;
     params.flash_addr = start_addr;
     params.flash_length = length;
 }
 
-// Метод помощник: Перевести массив байт в число UInt32
+/**
+* Utility method for convert 4-bytes array into UInt32. Note: arr note[0] must have 127 maximum!
+* @param  {string} array of bytes
+* @return {number} representing UInt32
+*/
 FlashFS.prototype.b4u32 = function(arr){
     return (arr[3]) | (arr[2] << 8) | (arr[1] << 16) | (arr[0] << 24);
 };
 
-// Метод помощник: Перевести число из UInt32 в массив байт
+/**
+* Utility method for convert UInt32 number into 4-bytes array
+* @param  {string} source number
+* @return {number} return bytes array
+*/
 FlashFS.prototype.u32b4 = function(number){
     return [(number >> 24) & 0xFF, (number >> 16) & 0xFF, (number >> 8)  & 0xFF, (number >> 0)  & 0xFF];
 };
 
-// Проверка, что флеш память инициализирована модулем FS и нет ошибок
+/**
+* Method for checking file system for working
+* @return {boolean} true if file system is prepared
+*/
 FlashFS.prototype.check = function(){
     if (params.flash.read(3, params.flash_addr) != params.HEADER_BYTE){
         return false;
@@ -42,17 +70,23 @@ FlashFS.prototype.check = function(){
     return true;
 };
 
-// Инициализация FS
+/**
+* Method for initialization file system. While we writing only header and check it
+* @return {boolean} true if file system is prepared
+*/
 FlashFS.prototype.prepare = function(){
     params.flash.write(params.HEADER_BYTE, params.flash_addr);
     return this.check();
 };
 
 
-// Полное форматирование FS с обнулением всех страниц флеша
+/**
+* Format is full erasing flash pages (all bytes set 255) and call prepare method for initialize FS
+* @return {boolean} true if file system is prepared
+*/
 FlashFS.prototype.format = function(){
 
-    // Watchdog нужно усмирить и перейти на асинхронный режим
+    // Watchdog нужно усмирить или перейти на асинхронный режим. NOTE: need rewrite for chunk operations
     for (let cAddr = params.flash_addr; cAddr < params.flash_addr + params.flash_length; cAddr = cAddr + params.PAGE_SIZE){
         params.flash.erasePage(cAddr);
     }
@@ -60,7 +94,11 @@ FlashFS.prototype.format = function(){
     return this.prepare();
 };
 
-// Прочитать список файлов
+/**
+* Return array of all file names from FS. Each file object has advanced properties for file operations.
+* @return {object} array of file object. File descriptor has BOF, EOF - special bytes for segmenting files in FS table. ADDR - first byte of file content, LENGTH - file size.
+*
+*/
 FlashFS.prototype.list = function(){
     if (this.check()){
         let pos = params.flash_addr + params.HEADER_BYTE.length;
@@ -105,7 +143,12 @@ FlashFS.prototype.list = function(){
     }
 };
 
-// Открыть файл
+/**
+* Primary method for opening file for write and read operations
+* @param  {string} path that has 16 maximum chars
+* @param  {string} mode "r" for reading or "w" for writing operation
+* @return {number} FileFS object to manage read and write position
+*/
 FlashFS.prototype.openFile = function(path, mode){
 	let ls = this.list();
     let existsFile = ls.find((x) => x.path.toLowerCase() == path.toLowerCase());
@@ -169,7 +212,13 @@ FlashFS.prototype.openFile = function(path, mode){
 	}
 };
 
-// Оболочка для работы с файлами
+/**
+* Object for file operation: read, write, seek and other. It instanced internally in openFile method and user don't need do it self
+* @constructor
+* @param  {object} object of FS. FileFS working with flash module and use ref of FS object for manipulating (write/read/seek)
+* @return {object} file descriptor of list method
+* @return {string} mode "r" or "w"
+*/
 function FileFS(fs, fileIndex, mode){
     this.fs = fs;
     this.fileIndex = fileIndex;
@@ -179,7 +228,11 @@ function FileFS(fs, fileIndex, mode){
     this.seekPos = fileIndex.addr;
 }
 
-// Выполняет неблокирующее чтение файла и запись порциями в объект destination (ТЕСТИРОВАТЬ НАДО)
+/**
+* Pipe implements a method for non-blocking reading of a file and writing to a destination object
+* @param  {object} destination is object, which has write method
+* @return {object} options is optional object. Default chunkSize is 32. See sources for more information
+*/
 FileFS.prototype.pipe = function(destination, options){
     let chunkSize = options && options.chunkSize || 32;
     let self = this;
@@ -199,8 +252,11 @@ FileFS.prototype.pipe = function(destination, options){
     }, 10);
 };
 
-// Передвигает текущую позицию чтения/записи на указанное количество байт вперед/назад
-// Возвращает абсолютную позицию потока
+/**
+* Seek is method similar as Skip, but work in forward and backward
+* @param  {number} nBytes is a number which is the relative position for offset
+* @return {string} Return absolute current position/address
+*/
 FileFS.prototype.seek = function(nBytes){
     let newSeekPos = this.seekPos + (nBytes || 0);
 
@@ -212,7 +268,12 @@ FileFS.prototype.seek = function(nBytes){
     return this.seekPos = newSeekPos;
 };
 
-// Передвигает текущую позицию чтения/записи вперед на указанное количество байт
+
+/**
+* Skip bytes forward after current position
+* @param  {number} nBytes is a number which is the relative position for offset
+* @return {string} Return absolute current position/address
+*/
 FileFS.prototype.skip = function(nBytes){
     nBytes = nBytes || 0;
 
@@ -223,7 +284,12 @@ FileFS.prototype.skip = function(nBytes){
     this.seek(nBytes);
 };
 
-// Функция читает файл и возвращает строку. Указываем количество байт, которые требуется прочесть
+
+/**
+* Read file content and return string. Only "r" mode for using. More information in readBytes method
+* @param  {number} length is count of bytes for reading
+* @return {string} Read bytes are converted to a string
+*/
 FileFS.prototype.read = function(length){
     let buffer = this.readBytes(length);
     
@@ -234,7 +300,13 @@ FileFS.prototype.read = function(length){
     }
 };
 
-// Функция читает файл как массив байт. Указываем количество байт, которые требуется прочесть
+/**
+* Read file content and return UInt8 array. Only "r" mode for using
+* @param  {number} length is count of bytes for reading.
+* If the file is longer than its size, or the read position does not allow the specified number of bytes to be read, the available number will be read.
+* Return undefined if reading position equal end of file
+* @return {object} array of reading bytes
+*/
 FileFS.prototype.readBytes = function(length){
     if (this.mode == "w"){
         throw new Error("FS: Can't read in write mode!");
@@ -261,8 +333,11 @@ FileFS.prototype.readBytes = function(length){
 };
 
 
-// Записываем данные в файл
-// buffer - если строка, то запишется как массив байт. Если является целым числом, тогда пишется один байт
+/**
+* Write file content in current position. Only "w" mode for using
+* @param  {string} object, array, string or number. If is number, then it see as byte and value up to 255
+* @return {number} number of writing bytes
+*/
 FileFS.prototype.write = function(buffer){
     let lenBuffer;
 
@@ -276,7 +351,7 @@ FileFS.prototype.write = function(buffer){
         throw new Error("FS: Can't write in read mode!");
     }
 
-    if (this.seekPos + lenBuffer >= params.flash_length){
+    if (this.seekPos + lenBuffer > params.flash_length){
         throw new Error("FS: Can't write. Not enough free space!");
     }
 
@@ -286,7 +361,9 @@ FileFS.prototype.write = function(buffer){
     return lenBuffer;
 };
 
-// Обязательно закрываем файл в операциях записи
+/**
+* The close method must be called on write operations! When used method, function calculate real file size and write in FS table
+*/
 FileFS.prototype.close = function(){
     if (this.mode == "r"){
         return;
