@@ -86,7 +86,7 @@ FlashFS.prototype.prepare = function(){
 */
 FlashFS.prototype.format = function(){
 
-    // Watchdog нужно усмирить или перейти на асинхронный режим. NOTE: need rewrite for chunk operations
+    // NOTE: need rewrite for chunk operations. WDT maybe cause problem
     for (let cAddr = params.flash_addr; cAddr < params.flash_addr + params.flash_length; cAddr = cAddr + params.PAGE_SIZE){
         params.flash.erasePage(cAddr);
     }
@@ -216,16 +216,20 @@ FlashFS.prototype.openFile = function(path, mode){
 * Object for file operation: read, write, seek and other. It instanced internally in openFile method and user don't need do it self
 * @constructor
 * @param  {object} object of FS. FileFS working with flash module and use ref of FS object for manipulating (write/read/seek)
-* @return {object} file descriptor of list method
-* @return {string} mode "r" or "w"
+* @param  {object} file descriptor of list method
+* @param  {string} mode "r" or "w"
+* @return {object} object wrapper with file operations methods
 */
 function FileFS(fs, fileIndex, mode){
     this.fs = fs;
     this.fileIndex = fileIndex;
     this.mode = mode;
 
+    // Свойство только для чтения. Для удобства
+    Object.defineProperty(this, "length", { value: fileIndex.length, writable: false });
+
     // Выставляем указатель на первый байт тела файла
-    this.seekPos = fileIndex.addr;
+    this.seekAddr = fileIndex.addr;
 }
 
 /**
@@ -264,37 +268,59 @@ FileFS.prototype.pipe = function(destination, options){
 };
 
 /**
-* Seek is method similar as Skip, but work in forward and backward
-* @param  {number} nBytes is a number which is the relative position for offset
-* @return {string} Return absolute current position/address
+* Seek method change stream cursor position in file. Work in read mode only. If nBytes is not set then returning current position.
+* @param  {number} nBytes is new position. 0 - start of file body, max value - length of file
+* @return {string} Returns the position
 */
 FileFS.prototype.seek = function(nBytes){
-    let newSeekPos = this.seekPos + (nBytes || 0);
+    if (nBytes != undefined){
+        if (this.mode == "w"){
+            throw new Error("FS: Can't seek in write mode!");
+        }
 
-    // Если передвигаем позицию за пределы начала файла или конца флеша
-    if (newSeekPos < this.fileIndex.addr || newSeekPos > this.fs.addr){
-        throw new Error("FS: Wrong position to seek!");
+        if (nBytes < 0){
+            throw new Error("FS: Seek value should be positive number!");
+        }
+
+        // Если передвигаем позицию за пределы начала файла или конца флеша
+        let newSeekAddr = this.fileIndex.addr + nBytes;
+
+        if ((newSeekAddr < this.fileIndex.addr) || (newSeekAddr > this.fileIndex.addr + this.fileIndex.length)){
+            throw new Error("FS: Wrong position to seek!");
+        }
+        this.seekAddr = newSeekAddr;
     }
 
-    return this.seekPos = newSeekPos;
+    // Возвращаем относительную позицию
+    return this.seekAddr - this.fileIndex.addr;
 };
-
 
 /**
-* Skip bytes forward after current position
-* @param  {number} nBytes is a number which is the relative position for offset
-* @return {string} Return absolute current position/address
+* Skip bytes forward after current position. Work in write mode only.
+* @param  {number} nBytes is count bytes for skipping.
+* @return {string} Returns the new position
 */
 FileFS.prototype.skip = function(nBytes){
-    nBytes = nBytes || 0;
+    if (nBytes){
+        if (this.mode == "r"){
+            throw new Error("FS: Can't skip in read mode!");
+        }
 
-    if (nBytes < 0){
-        throw new Error("FS: nBytes should be positive number!");
+        if (nBytes < 0){
+            throw new Error("FS: Skip value should be positive number!");
+        }
+
+        let newSkipAddr = this.seekAddr + nBytes;
+
+        if ((newSeekAddr < this.fileIndex.addr) || (newSkipAddr > params.flash_addr + params.flash_length)){
+            throw new Error("FS: Skip position can't be less than begin of file or over flash length!");
+        }
+        this.seekAddr = newSkipAddr;
     }
 
-    this.seek(nBytes);
+    // Возвращаем относитетельную позицию
+    return this.seekAddr - this.fileIndex.addr;
 };
-
 
 /**
 * Read file content and return string. Only "r" mode for using. More information in readBytes method
@@ -324,25 +350,24 @@ FileFS.prototype.readBytes = function(length){
     }
 
     let absEof = this.fileIndex.addr + this.fileIndex.length;
-    let availableLength = absEof - (this.seekPos + length);
+    let availableLength = absEof - (this.seekAddr + length);
 
     // Если доступно меньше запрашиваемого размера, тогда отдаём всё что осталось
     if (availableLength > 0){
         availableLength = length;
     } else {
-        availableLength = absEof - this.seekPos;
+        availableLength = absEof - this.seekAddr;
     }
 
     if (availableLength > 0){
-        let buffer = params.flash.read(availableLength, this.seekPos);
-        this.seekPos += availableLength;
+        let buffer = params.flash.read(availableLength, this.seekAddr);
+        this.seekAddr += availableLength;
 
         return buffer;
     }
 
     return;
 };
-
 
 /**
 * Write file content in current position. Only "w" mode for using
@@ -362,27 +387,29 @@ FileFS.prototype.write = function(buffer){
         throw new Error("FS: Can't write in read mode!");
     }
 
-    if (this.seekPos + lenBuffer > params.flash_length){
+    if (this.seekAddr + lenBuffer > params.flash_length){
         throw new Error("FS: Can't write. Not enough free space!");
     }
 
-    params.flash.write(buffer, this.seekPos);
-    this.seekPos += lenBuffer;
+    params.flash.write(buffer, this.seekAddr);
+    this.seekAddr += lenBuffer;
 
     return lenBuffer;
 };
 
 /**
 * The close method must be called on write operations! When used method, function calculate real file size and write in FS table
+* @return {undefined} always return true 
 */
 FileFS.prototype.close = function(){
-    if (this.mode == "r"){
-        return;
+    if (this.mode == "w"){
+        
+        // Запишем размер файла
+        let lenFile = this.seekAddr - this.fileIndex.addr;
+        params.flash.write(this.fs.u32b4(lenFile), this.fileIndex.bof + params.BOF_LENGTH + params.FILE_NAME_LENGTH);
     }
 
-    // Запишем размер файла
-    let lenFile = this.seekPos - this.fileIndex.addr;
-    params.flash.write(this.fs.u32b4(lenFile), this.fileIndex.bof + params.BOF_LENGTH + params.FILE_NAME_LENGTH);
+    return true;
 };
 
 exports = function(flashObject, start_addr, length){ return new FlashFS(flashObject, start_addr, length) };
