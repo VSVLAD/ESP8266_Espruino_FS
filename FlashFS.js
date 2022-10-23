@@ -170,7 +170,7 @@ FlashFS.prototype.openFile = function(path, mode){
             if (ls.length > 0){
                 let lastFile = ls[ls.length - 1];
                 newBof = lastFile.eof + params.EOF_LENGTH;
-                lastUsedAddr = lastFile.addr;
+                lastUsedAddr = lastFile.addr + lastFile.length;
 
             } else {
                 newBof = params.flash_addr + params.HEADER_BYTE.length;
@@ -235,21 +235,32 @@ function FileFS(fs, fileIndex, mode){
 */
 FileFS.prototype.pipe = function(destination, options){
     let chunkSize = options && options.chunkSize || 32;
-    let self = this;
+    let buffer;
+    let pipeId;
 
-    setTimeout(function pipeRead(){
-        let buffer;
-        if (buffer = self.read(chunkSize)) {
+    function pipeRead(){
+        if (buffer = this.read(chunkSize)) {
             destination.write(buffer);
-
-            setTimeout(pipeRead, 10);
+            buffer = null;
         } else {
-            // Если файл закончился, вызываем функцию завершения
+
+            // Выключаем таймер
+            clearInterval(pipeId);
+
+            // Если требуется, вызываем функцию завершения
+            if (options && options.end == true) {
+                destination.end();
+            }
+    
+            // Если требуется, вызываем функцию успеха
             if (options && typeof options.complete === "function") {
                 options.complete();
             }
         }
-    }, 10);
+    }
+    
+    // Планируем таймер
+    pipeId = setInterval(pipeRead.bind(this));
 };
 
 /**
