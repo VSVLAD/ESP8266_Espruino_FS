@@ -11,15 +11,15 @@
 let params = {
     PAGE_SIZE: 4096,
 
-    FILE_NAME_LENGTH: 16,
+    FILE_NAME_LENGTH: 32,
     FILE_SIZE_LENGTH: 4,
     FILE_ADDR_LENGTH: 4,
     BOF_LENGTH: 1,
     EOF_LENGTH: 1,
 
-    HEADER_BYTE: [56, 46, 53],
-    BOF_BYTE: 250,
-    EOF_BYTE: 251,
+    HEADER_BYTES: [0x46, 0x53],
+    BOF_BYTE: 0xFA,
+    EOF_BYTE: 0xFB,
 
     flash: undefined,
     flash_addr: undefined,
@@ -63,7 +63,7 @@ FlashFS.prototype.u32b4 = function(number){
 * @return {boolean} true if file system is prepared
 */
 FlashFS.prototype.check = function(){
-    if (params.flash.read(3, params.flash_addr) != params.HEADER_BYTE){
+    if (params.flash.read(params.HEADER_BYTES.length, params.flash_addr) != params.HEADER_BYTES){
         return false;
     }
 
@@ -75,7 +75,7 @@ FlashFS.prototype.check = function(){
 * @return {boolean} true if file system is prepared
 */
 FlashFS.prototype.prepare = function(){
-    params.flash.write(params.HEADER_BYTE, params.flash_addr);
+    params.flash.write(params.HEADER_BYTES, params.flash_addr);
     return this.check();
 };
 
@@ -95,13 +95,23 @@ FlashFS.prototype.format = function(){
 };
 
 /**
+* Check path exists
+* @param  {string} path to file
+* @return {number} return true or false
+*/
+FlashFS.prototype.exists = function(path){
+    let existsFile = this.list().find((x) => x.path.toLowerCase() == path.toLowerCase());
+    return existsFile != undefined;
+};
+
+/**
 * Return array of all file names from FS. Each file object has advanced properties for file operations.
 * @return {object} array of file object. File descriptor has BOF, EOF - special bytes for segmenting files in FS table. ADDR - first byte of file content, LENGTH - file size.
 *
 */
 FlashFS.prototype.list = function(){
     if (this.check()){
-        let pos = params.flash_addr + params.HEADER_BYTE.length;
+        let pos = params.flash_addr + params.HEADER_BYTES.length;
         let ls = [];
 
         // Если найдена позиция BOF файла
@@ -170,11 +180,11 @@ FlashFS.prototype.openFile = function(path, mode){
             if (ls.length > 0){
                 let lastFile = ls[ls.length - 1];
                 newBof = lastFile.eof + params.EOF_LENGTH;
-                lastUsedAddr = lastFile.addr + lastFile.length;
+                lastUsedAddr = lastFile.addr + lastFile.length - 1;
 
             } else {
-                newBof = params.flash_addr + params.HEADER_BYTE.length;
-                lastUsedAddr = newBof;
+                newBof = params.flash_addr + params.HEADER_BYTES.length;
+                lastUsedAddr = params.PAGE_SIZE - 1;
             }
 
             // Проверка, не вышел ли новый файл за пределы таблицы дескрипторов
@@ -184,7 +194,7 @@ FlashFS.prototype.openFile = function(path, mode){
             }
 
             // Адрес для начала записи тела файла
-            newAddr = params.flash_addr + ((Math.floor((lastUsedAddr - params.flash_addr) / params.PAGE_SIZE) + 1) * params.PAGE_SIZE);
+            let newAddr = params.flash_addr + ((Math.floor((lastUsedAddr - params.flash_addr) / params.PAGE_SIZE) + 1) * params.PAGE_SIZE);
 
             if (newAddr >= params.flash_length){
                 throw new Error("FS is full!");
@@ -268,7 +278,7 @@ FileFS.prototype.pipe = function(destination, options){
 };
 
 /**
-* Seek method change stream cursor position in file. Work in read mode only. If nBytes is not set then returning current position.
+* Seek method change stream cursor position in file. Work in read mode only. If nBytes is not set then returning current position in all modes
 * @param  {number} nBytes is new position. 0 - start of file body, max value - length of file
 * @return {string} Returns the position
 */
@@ -285,7 +295,7 @@ FileFS.prototype.seek = function(nBytes){
         // Если передвигаем позицию за пределы начала файла или конца флеша
         let newSeekAddr = this.fileIndex.addr + nBytes;
 
-        if ((newSeekAddr < this.fileIndex.addr) || (newSeekAddr > this.fileIndex.addr + this.fileIndex.length)){
+        if (newSeekAddr > this.fileIndex.addr + this.fileIndex.length){
             throw new Error("FS: Wrong position to seek!");
         }
         this.seekAddr = newSeekAddr;
@@ -310,16 +320,16 @@ FileFS.prototype.skip = function(nBytes){
             throw new Error("FS: Skip value should be positive number!");
         }
 
-        let newSkipAddr = this.seekAddr + nBytes;
+        let newSeekAddr = this.seekAddr + nBytes;
 
-        if ((newSeekAddr < this.fileIndex.addr) || (newSkipAddr > params.flash_addr + params.flash_length)){
+        if (newSeekAddr > params.flash_addr + params.flash_length){
             throw new Error("FS: Skip position can't be less than begin of file or over flash length!");
         }
-        this.seekAddr = newSkipAddr;
+        this.seekAddr = newSeekAddr;
     }
 
     // Возвращаем относитетельную позицию
-    return this.seekAddr - this.fileIndex.addr;
+    return this.seekAddr;
 };
 
 /**
@@ -375,16 +385,16 @@ FileFS.prototype.readBytes = function(length){
 * @return {number} number of writing bytes
 */
 FileFS.prototype.write = function(buffer){
+    if (this.mode == "r"){
+        throw new Error("FS: Can't write in read mode!");
+    }
+
     let lenBuffer;
 
     if (typeof buffer === "object" || typeof buffer === "string"){
         lenBuffer = buffer.length;
     } else {
         lenBuffer = 1;
-    }
-
-    if (this.mode == "r"){
-        throw new Error("FS: Can't write in read mode!");
     }
 
     if (this.seekAddr + lenBuffer > params.flash_length){
