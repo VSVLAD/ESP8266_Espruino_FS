@@ -106,36 +106,36 @@ FlashFS.prototype.exists = function(path){
 
 /**
 * Return array of all file names from FS. Each file object has advanced properties for file operations.
+* @param  {boolean} if true return full index object used for file operations
 * @return {object} array of file object. File descriptor has BOF, EOF - special bytes for segmenting files in FS table. ADDR - first byte of file content, LENGTH - file size.
-*
 */
-FlashFS.prototype.list = function(){
+FlashFS.prototype.list = function(full){
     if (this.check()){
-        let pos = params.flash_addr + params.HEADER_BYTES.length;
+        let pos = params.HEADER_BYTES.length;
         let ls = [];
 
         // Если найдена позиция BOF файла
-        while (params.flash.read(params.BOF_LENGTH, pos) == [params.BOF_BYTE]){
+        while (params.flash.read(params.BOF_LENGTH, params.flash_addr + pos) == [params.BOF_BYTE]){
             let f = {};
 
-            f.bof = pos;
+            if (full) { f.bof = pos; }
             pos += params.BOF_LENGTH;
 
             // Имя файла
-            f.path = E.toString(params.flash.read(params.FILE_NAME_LENGTH, pos)).trim();
+            f.path = E.toString(params.flash.read(params.FILE_NAME_LENGTH, params.flash_addr + pos)).trim();
             pos += params.FILE_NAME_LENGTH;
 
             // Размер файла
-            f.length = this.b4u32(params.flash.read(params.FILE_SIZE_LENGTH, pos)); // note [0] is max 127
+            f.length = this.b4u32(params.flash.read(params.FILE_SIZE_LENGTH, params.flash_addr + pos)); // note [0] is max 127
             pos += params.FILE_SIZE_LENGTH;
 
             // Адрес файла
-            f.addr = this.b4u32(params.flash.read(params.FILE_ADDR_LENGTH, pos));
+            if (full) { f.addr = this.b4u32(params.flash.read(params.FILE_ADDR_LENGTH, params.flash_addr + pos)); }
             pos += params.FILE_ADDR_LENGTH;
 
             // Проверка на EOF файла
-            if (params.flash.read(params.EOF_LENGTH, pos) == [params.EOF_BYTE]){
-                f.eof = pos;
+            if (params.flash.read(params.EOF_LENGTH, params.flash_addr + pos) == [params.EOF_BYTE]){
+                if (full) { f.eof = pos; }
                 pos += params.EOF_LENGTH;
 
             } else {
@@ -160,7 +160,7 @@ FlashFS.prototype.list = function(){
 * @return {number} FileFS object to manage read and write position
 */
 FlashFS.prototype.openFile = function(path, mode){
-	let ls = this.list();
+	let ls = this.list(true);
     let existsFile = ls.find((x) => x.path.toLowerCase() == path.toLowerCase());
 
 	switch(mode){
@@ -183,28 +183,28 @@ FlashFS.prototype.openFile = function(path, mode){
                 lastUsedAddr = lastFile.addr + lastFile.length - 1;
 
             } else {
-                newBof = params.flash_addr + params.HEADER_BYTES.length;
+                newBof = params.HEADER_BYTES.length;
                 lastUsedAddr = params.PAGE_SIZE - 1;
             }
 
             // Проверка, не вышел ли новый файл за пределы таблицы дескрипторов
             let newEof = newBof + params.BOF_LENGTH + params.FILE_NAME_LENGTH + params.FILE_SIZE_LENGTH + params.FILE_ADDR_LENGTH + params.EOF_LENGTH;
-            if (newEof - params.flash_addr > params.PAGE_SIZE - 1){
+            if (newEof > params.PAGE_SIZE - 1){
                 throw new Error("FS has maximum files!");
             }
 
             // Адрес для начала записи тела файла
-            let newAddr = params.flash_addr + ((Math.floor((lastUsedAddr - params.flash_addr) / params.PAGE_SIZE) + 1) * params.PAGE_SIZE);
-
+            let newAddr = lastUsedAddr + 1;
             if (newAddr >= params.flash_length){
                 throw new Error("FS is full!");
             }
 
-            // Запишем BOF, имя, адрес и EOF. Размер файла пропустим, будет заполнен при его закрытии
-            params.flash.write(params.BOF_BYTE, newBof);
-            params.flash.write(newPath, newBof + params.BOF_LENGTH);
-            params.flash.write(this.u32b4(newAddr), newBof + params.BOF_LENGTH + params.FILE_NAME_LENGTH + params.FILE_SIZE_LENGTH);
-            params.flash.write(params.EOF_BYTE, newBof + params.BOF_LENGTH + params.FILE_NAME_LENGTH + params.FILE_SIZE_LENGTH + params.FILE_ADDR_LENGTH);
+            // Запишем BOF, имя, адрес и EOF. 
+            params.flash.write(params.BOF_BYTE, params.flash_addr + newBof);
+            params.flash.write(newPath, params.flash_addr + newBof + params.BOF_LENGTH);
+            // >>> params.flash.write(...) <<< Размер файла пропустим, будет заполнен при его закрытии
+            params.flash.write(this.u32b4(newAddr), params.flash_addr + newBof + params.BOF_LENGTH + params.FILE_NAME_LENGTH + params.FILE_SIZE_LENGTH);
+            params.flash.write(params.EOF_BYTE, params.flash_addr + newBof + params.BOF_LENGTH + params.FILE_NAME_LENGTH + params.FILE_SIZE_LENGTH + params.FILE_ADDR_LENGTH);
 
             // Для выполнения записи требуется передать BOF файла и адрес
             let writeFile = {bof: newBof, addr: newAddr};
@@ -235,11 +235,8 @@ function FileFS(fs, fileIndex, mode){
     this.fileIndex = fileIndex;
     this.mode = mode;
 
-    // Свойство только для чтения. Для удобства
-    Object.defineProperty(this, "length", { value: fileIndex.length, writable: false });
-
     // Выставляем указатель на первый байт тела файла
-    this.seekAddr = fileIndex.addr;
+    this.seekAddr = 0;
 }
 
 /**
@@ -279,30 +276,28 @@ FileFS.prototype.pipe = function(destination, options){
 
 /**
 * Seek method change stream cursor position in file. Work in read mode only. If nBytes is not set then returning current position in all modes
-* @param  {number} nBytes is new position. 0 - start of file body, max value - length of file
+* @param  {number} nBytesPos is new position. 0 - start of file body, max value - length of file
 * @return {string} Returns the position
 */
-FileFS.prototype.seek = function(nBytes){
-    if (nBytes != undefined){
+FileFS.prototype.seek = function(nBytesPos){
+    if (nBytesPos != undefined){
         if (this.mode == "w"){
             throw new Error("FS: Can't seek in write mode!");
         }
 
-        if (nBytes < 0){
+        if (nBytesPos < 0){
             throw new Error("FS: Seek value should be positive number!");
         }
 
         // Если передвигаем позицию за пределы начала файла или конца флеша
-        let newSeekAddr = this.fileIndex.addr + nBytes;
-
-        if (newSeekAddr > this.fileIndex.addr + this.fileIndex.length){
+        if (nBytesPos > this.fileIndex.length){
             throw new Error("FS: Wrong position to seek!");
         }
-        this.seekAddr = newSeekAddr;
+        this.seekAddr = nBytesPos;
     }
 
     // Возвращаем относительную позицию
-    return this.seekAddr - this.fileIndex.addr;
+    return this.seekAddr;
 };
 
 /**
@@ -320,12 +315,12 @@ FileFS.prototype.skip = function(nBytes){
             throw new Error("FS: Skip value should be positive number!");
         }
 
-        let newSeekAddr = this.seekAddr + nBytes;
-
-        if (newSeekAddr > params.flash_addr + params.flash_length){
+        let newSkipAddr = this.seekAddr + nBytes;
+        if (this.fileIndex.addr + newSkipAddr > params.flash_length){
             throw new Error("FS: Skip position can't be less than begin of file or over flash length!");
         }
-        this.seekAddr = newSeekAddr;
+
+        this.seekAddr = newSkipAddr;
     }
 
     // Возвращаем относитетельную позицию
@@ -359,18 +354,18 @@ FileFS.prototype.readBytes = function(length){
         throw new Error("FS: Can't read in write mode!");
     }
 
-    let absEof = this.fileIndex.addr + this.fileIndex.length;
-    let availableLength = absEof - (this.seekAddr + length);
+    let availableLength = this.fileIndex.length - (this.seekAddr + length);
 
     // Если доступно меньше запрашиваемого размера, тогда отдаём всё что осталось
     if (availableLength > 0){
         availableLength = length;
     } else {
-        availableLength = absEof - this.seekAddr;
+        availableLength = this.fileIndex.length - this.seekAddr;
     }
 
+    // Читаем по абсолютному пути: смещение на флеш + адрес файла + позиция
     if (availableLength > 0){
-        let buffer = params.flash.read(availableLength, this.seekAddr);
+        let buffer = params.flash.read(availableLength, params.flash_addr + this.fileIndex.addr + this.seekAddr);
         this.seekAddr += availableLength;
 
         return buffer;
@@ -397,11 +392,12 @@ FileFS.prototype.write = function(buffer){
         lenBuffer = 1;
     }
 
-    if (this.seekAddr + lenBuffer > params.flash_length){
+    if (this.fileIndex.addr + this.seekAddr + lenBuffer > params.flash_length){
         throw new Error("FS: Can't write. Not enough free space!");
     }
 
-    params.flash.write(buffer, this.seekAddr);
+    // Пишем по абсолютному пути: смещение на флеш + адрес файла + позиция
+    params.flash.write(buffer, params.flash_addr + this.fileIndex.addr + this.seekAddr);
     this.seekAddr += lenBuffer;
 
     return lenBuffer;
@@ -416,7 +412,7 @@ FileFS.prototype.close = function(){
         
         // Запишем размер файла
         let lenFile = this.seekAddr - this.fileIndex.addr;
-        params.flash.write(this.fs.u32b4(lenFile), this.fileIndex.bof + params.BOF_LENGTH + params.FILE_NAME_LENGTH);
+        params.flash.write(this.fs.u32b4(lenFile), params.flash_addr + this.fileIndex.bof + params.BOF_LENGTH + params.FILE_NAME_LENGTH);
     }
 
     return true;
